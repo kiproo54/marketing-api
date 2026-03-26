@@ -197,6 +197,138 @@ app.get('/events-by-match', async (req, res) => {
     }
 });
 
+// Get games for today and tomorrow - Step 5: Filter by date
+app.get('/games-today-tomorrow', async (req, res) => {
+    console.log('📅 Fetching games for today and tomorrow...');
+    
+    try {
+        // Make sure we have a valid token
+        if (!accessToken || Date.now() >= tokenExpiryTime) {
+            await getAccessToken();
+        }
+        
+        // Get current time and tomorrow's time
+        const now = Math.floor(Date.now() / 1000); // Current Unix timestamp
+        const tomorrow = now + (24 * 60 * 60); // Add 24 hours
+        
+        console.log(`📅 Today timestamp: ${now}`);
+        console.log(`📅 Tomorrow timestamp: ${tomorrow}`);
+        
+        // Call the API with date filters
+        const response = await axios.get(
+            'https://cpservm.com/gateway/marketing/datafeed/prematch/api/v2/sportevents',
+            {
+                params: {
+                    ref: REF,
+                    lng: req.query.lng || 'en',
+                    schemeOfGettingOddsOperations: 'GetAllOdds',
+                    sportIds: req.query.sportIds || 1,  // Default to football
+                    gtStart: now,    // Greater than current time
+                    ltStart: tomorrow, // Less than tomorrow
+                    count: parseInt(req.query.count) || 100
+                },
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`
+                }
+            }
+        );
+        
+        const events = response.data?.items || [];
+        
+        // Format dates for display
+        const formatDate = (timestamp) => {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString('en-US', {
+                dateStyle: 'full',
+                timeStyle: 'short'
+            });
+        };
+        
+        // Group by date (today vs tomorrow)
+        const todayGames = [];
+        const tomorrowGames = [];
+        const todayTimestamp = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
+        const tomorrowTimestamp = todayTimestamp + (24 * 60 * 60);
+        
+        events.forEach(event => {
+            const gameDate = new Date(event.startDate * 1000);
+            const gameDateStart = Math.floor(new Date(gameDate.setHours(0, 0, 0, 0)) / 1000);
+            
+            // Get main odds (W1, X, W2)
+            const mainOdds = {
+                w1: null,
+                draw: null,
+                w2: null
+            };
+            
+            if (event.oddsLocalization) {
+                event.oddsLocalization.forEach(odd => {
+                    if (odd.type === 1) mainOdds.w1 = odd.oddsMarket;
+                    if (odd.type === 2) mainOdds.draw = odd.oddsMarket;
+                    if (odd.type === 3) mainOdds.w2 = odd.oddsMarket;
+                });
+            }
+            
+            const gameInfo = {
+                sportEventId: event.sportEventId,
+                constSportEventId: event.constSportEventId,
+                mainConstSportEventId: event.mainConstSportEventId,
+                tournamentName: event.tournamentNameLocalization,
+                team1: event.opponent1NameLocalization,
+                team2: event.opponent2NameLocalization,
+                team1Image: event.imageOpponent1,
+                team2Image: event.imageOpponent2,
+                startDate: event.startDate,
+                startDateFormatted: formatDate(event.startDate),
+                period: event.period,
+                periodName: event.periodName,
+                type: event.type,
+                vid: event.vid,
+                link: event.link,
+                hasVideo: event.hasVideo,
+                hasInsights: event.hasInsights,
+                odds: mainOdds,
+                totalMarkets: event.oddsLocalization?.length || 0
+            };
+            
+            if (gameDateStart === todayTimestamp) {
+                todayGames.push(gameInfo);
+            } else if (gameDateStart === tomorrowTimestamp) {
+                tomorrowGames.push(gameInfo);
+            }
+        });
+        
+        console.log(`✅ Found ${todayGames.length} games today, ${tomorrowGames.length} games tomorrow`);
+        
+        res.json({
+            success: true,
+            today: {
+                count: todayGames.length,
+                games: todayGames
+            },
+            tomorrow: {
+                count: tomorrowGames.length,
+                games: tomorrowGames
+            },
+            totalGames: todayGames.length + tomorrowGames.length,
+            filters: {
+                sportIds: req.query.sportIds || 1,
+                dateRange: {
+                    from: new Date(now * 1000).toISOString().split('T')[0],
+                    to: new Date(tomorrow * 1000).toISOString().split('T')[0]
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Error fetching games:', error.response?.data || error.message);
+        res.status(500).json({
+            success: false,
+            error: error.response?.data || error.message
+        });
+    }
+});
+
 // Get odds for a specific sportEventId - Step 4: Direct odds lookup
 app.get('/event-odds/:sportEventId', async (req, res) => {
     const sportEventId = req.params.sportEventId;
@@ -388,16 +520,22 @@ app.get('/', (req, res) => {
                 params: '?sportIds=1&count=50'
             },
             {
+                path: '/games-today-tomorrow',
+                method: 'GET',
+                description: 'Get games for today and tomorrow only',
+                params: '?sportIds=1&lng=en'
+            },
+            {
                 path: '/event-odds/:sportEventId',
                 method: 'GET',
                 description: 'Get odds for specific event',
-                example: '/event-odds/351866018'
+                example: '/event-odds/704114254'
             },
             {
                 path: '/match-odds/:matchId',
                 method: 'GET',
                 description: 'Get odds for all events in a match',
-                example: '/match-odds/124075819'
+                example: '/match-odds/314606070'
             }
         ]
     });
@@ -412,6 +550,7 @@ if (process.env.VERCEL) {
         console.log(`📋 Test auth at: http://localhost:${PORT}/test-auth`);
         console.log(`⚽ Get events at: http://localhost:${PORT}/events`);
         console.log(`🏆 Get events by match at: http://localhost:${PORT}/events-by-match`);
-        console.log(`📊 Get event odds at: http://localhost:${PORT}/event-odds/351866018`);
+        console.log(`📅 Get today/tomorrow games at: http://localhost:${PORT}/games-today-tomorrow`);
+        console.log(`📊 Get event odds at: http://localhost:${PORT}/event-odds/704114254`);
     });
 }
