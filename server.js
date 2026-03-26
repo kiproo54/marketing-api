@@ -84,7 +84,7 @@ app.get('/events', async (req, res) => {
                     ref: REF,
                     lng: req.query.lng || 'en',
                     schemeOfGettingOddsOperations: req.query.scheme || 'GetAllOdds',
-                    sportIds: req.query.sportIds,
+                    sportIds: req.query.sportIds || 1,  // Default to football
                     count: parseInt(req.query.count) || 10
                 },
                 headers: {
@@ -126,7 +126,7 @@ app.get('/events-by-match', async (req, res) => {
                     ref: REF,
                     lng: 'en',
                     schemeOfGettingOddsOperations: 'GetAllOdds',
-                    sportIds: req.query.sportIds || 1,
+                    sportIds: req.query.sportIds || 1,  // Football only
                     count: parseInt(req.query.count) || 50
                 },
                 headers: {
@@ -197,9 +197,9 @@ app.get('/events-by-match', async (req, res) => {
     }
 });
 
-// Get games for today and tomorrow - Step 5: Filter by date
+// Get games for today and tomorrow - FOOTBALL ONLY, MANY LEAGUES
 app.get('/games-today-tomorrow', async (req, res) => {
-    console.log('📅 Fetching games for today and tomorrow...');
+    console.log('📅 Fetching FOOTBALL games for today and tomorrow...');
     
     try {
         // Make sure we have a valid token
@@ -208,13 +208,13 @@ app.get('/games-today-tomorrow', async (req, res) => {
         }
         
         // Get current time and tomorrow's time
-        const now = Math.floor(Date.now() / 1000); // Current Unix timestamp
-        const tomorrow = now + (24 * 60 * 60); // Add 24 hours
+        const now = Math.floor(Date.now() / 1000);
+        const tomorrow = now + (24 * 60 * 60);
         
         console.log(`📅 Today timestamp: ${now}`);
         console.log(`📅 Tomorrow timestamp: ${tomorrow}`);
         
-        // Call the API with date filters
+        // Call the API with date filters - FOOTBALL ONLY (sportId=1)
         const response = await axios.get(
             'https://cpservm.com/gateway/marketing/datafeed/prematch/api/v2/sportevents',
             {
@@ -222,10 +222,10 @@ app.get('/games-today-tomorrow', async (req, res) => {
                     ref: REF,
                     lng: req.query.lng || 'en',
                     schemeOfGettingOddsOperations: 'GetAllOdds',
-                    sportIds: req.query.sportIds || 1,  // Default to football
-                    gtStart: now,    // Greater than current time
-                    ltStart: tomorrow, // Less than tomorrow
-                    count: parseInt(req.query.count) || 100
+                    sportIds: 1,  // FOOTBALL ONLY
+                    gtStart: now,
+                    ltStart: tomorrow,
+                    count: parseInt(req.query.count) || 500  // Get up to 500 games
                 },
                 headers: {
                     'Authorization': `Bearer ${accessToken}`
@@ -244,13 +244,20 @@ app.get('/games-today-tomorrow', async (req, res) => {
             });
         };
         
-        // Group by date (today vs tomorrow)
+        // Group by date (today vs tomorrow) AND by league
         const todayGames = [];
         const tomorrowGames = [];
         const todayTimestamp = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
         const tomorrowTimestamp = todayTimestamp + (24 * 60 * 60);
         
+        // Also group by league for better organization
+        const todayLeagues = new Map();
+        const tomorrowLeagues = new Map();
+        
         events.forEach(event => {
+            // Only include main events (period=0, type=1) to avoid duplicates
+            if (event.period !== 0 || event.type !== 1) return;
+            
             const gameDate = new Date(event.startDate * 1000);
             const gameDateStart = Math.floor(new Date(gameDate.setHours(0, 0, 0, 0)) / 1000);
             
@@ -273,6 +280,7 @@ app.get('/games-today-tomorrow', async (req, res) => {
                 sportEventId: event.sportEventId,
                 constSportEventId: event.constSportEventId,
                 mainConstSportEventId: event.mainConstSportEventId,
+                tournamentId: event.tournamentId,
                 tournamentName: event.tournamentNameLocalization,
                 team1: event.opponent1NameLocalization,
                 team2: event.opponent2NameLocalization,
@@ -280,39 +288,64 @@ app.get('/games-today-tomorrow', async (req, res) => {
                 team2Image: event.imageOpponent2,
                 startDate: event.startDate,
                 startDateFormatted: formatDate(event.startDate),
-                period: event.period,
-                periodName: event.periodName,
-                type: event.type,
-                vid: event.vid,
                 link: event.link,
                 hasVideo: event.hasVideo,
                 hasInsights: event.hasInsights,
-                odds: mainOdds,
-                totalMarkets: event.oddsLocalization?.length || 0
+                odds: mainOdds
             };
             
             if (gameDateStart === todayTimestamp) {
                 todayGames.push(gameInfo);
+                // Group by league for today
+                if (!todayLeagues.has(event.tournamentNameLocalization)) {
+                    todayLeagues.set(event.tournamentNameLocalization, {
+                        tournamentId: event.tournamentId,
+                        tournamentName: event.tournamentNameLocalization,
+                        games: []
+                    });
+                }
+                todayLeagues.get(event.tournamentNameLocalization).games.push(gameInfo);
             } else if (gameDateStart === tomorrowTimestamp) {
                 tomorrowGames.push(gameInfo);
+                // Group by league for tomorrow
+                if (!tomorrowLeagues.has(event.tournamentNameLocalization)) {
+                    tomorrowLeagues.set(event.tournamentNameLocalization, {
+                        tournamentId: event.tournamentId,
+                        tournamentName: event.tournamentNameLocalization,
+                        games: []
+                    });
+                }
+                tomorrowLeagues.get(event.tournamentNameLocalization).games.push(gameInfo);
             }
         });
         
-        console.log(`✅ Found ${todayGames.length} games today, ${tomorrowGames.length} games tomorrow`);
+        // Convert leagues maps to sorted arrays
+        const todayLeaguesList = Array.from(todayLeagues.values()).sort((a, b) => 
+            a.tournamentName.localeCompare(b.tournamentName)
+        );
+        const tomorrowLeaguesList = Array.from(tomorrowLeagues.values()).sort((a, b) => 
+            a.tournamentName.localeCompare(b.tournamentName)
+        );
+        
+        console.log(`✅ Today: ${todayGames.length} games in ${todayLeaguesList.length} leagues`);
+        console.log(`✅ Tomorrow: ${tomorrowGames.length} games in ${tomorrowLeaguesList.length} leagues`);
         
         res.json({
             success: true,
+            sport: "Football (Soccer)",
             today: {
                 count: todayGames.length,
-                games: todayGames
+                leagueCount: todayLeaguesList.length,
+                leagues: todayLeaguesList
             },
             tomorrow: {
                 count: tomorrowGames.length,
-                games: tomorrowGames
+                leagueCount: tomorrowLeaguesList.length,
+                leagues: tomorrowLeaguesList
             },
             totalGames: todayGames.length + tomorrowGames.length,
             filters: {
-                sportIds: req.query.sportIds || 1,
+                sportId: 1,
                 dateRange: {
                     from: new Date(now * 1000).toISOString().split('T')[0],
                     to: new Date(tomorrow * 1000).toISOString().split('T')[0]
@@ -329,10 +362,9 @@ app.get('/games-today-tomorrow', async (req, res) => {
     }
 });
 
-// Get odds for a specific sportEventId - Step 4: Direct odds lookup
-app.get('/event-odds/:sportEventId', async (req, res) => {
-    const sportEventId = req.params.sportEventId;
-    console.log(`📊 Getting odds for sportEventId: ${sportEventId}`);
+// Get all football games - ALL LEAGUES, ALL DATES
+app.get('/all-games', async (req, res) => {
+    console.log('⚽ Fetching ALL FOOTBALL games from all leagues...');
     
     try {
         // Make sure we have a valid token
@@ -340,7 +372,126 @@ app.get('/event-odds/:sportEventId', async (req, res) => {
             await getAccessToken();
         }
         
-        // Get odds for this specific sportEventId
+        // Get all football events (sportId=1) with a high count
+        const response = await axios.get(
+            'https://cpservm.com/gateway/marketing/datafeed/prematch/api/v2/sportevents',
+            {
+                params: {
+                    ref: REF,
+                    lng: req.query.lng || 'en',
+                    schemeOfGettingOddsOperations: req.query.scheme || 'GetAllOdds',
+                    sportIds: 1,  // FOOTBALL ONLY
+                    count: parseInt(req.query.count) || 500  // Get up to 500 events
+                },
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`
+                }
+            }
+        );
+        
+        const events = response.data?.items || [];
+        
+        // Filter to only main events (period=0, type=1) to avoid duplicates
+        const mainEvents = events.filter(event => event.period === 0 && event.type === 1);
+        
+        // Format date function
+        const formatDate = (timestamp) => {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString('en-US', {
+                dateStyle: 'full',
+                timeStyle: 'short'
+            });
+        };
+        
+        // Group by tournament/league
+        const leaguesMap = new Map();
+        
+        mainEvents.forEach(event => {
+            const tournamentId = event.tournamentId;
+            const tournamentName = event.tournamentNameLocalization;
+            
+            if (!leaguesMap.has(tournamentId)) {
+                leaguesMap.set(tournamentId, {
+                    tournamentId: tournamentId,
+                    tournamentName: tournamentName,
+                    tournamentImage: event.tournamentImage,
+                    games: []
+                });
+            }
+            
+            // Get main odds (W1, X, W2)
+            const mainOdds = {
+                w1: null,
+                draw: null,
+                w2: null
+            };
+            
+            if (event.oddsLocalization) {
+                event.oddsLocalization.forEach(odd => {
+                    if (odd.type === 1) mainOdds.w1 = odd.oddsMarket;
+                    if (odd.type === 2) mainOdds.draw = odd.oddsMarket;
+                    if (odd.type === 3) mainOdds.w2 = odd.oddsMarket;
+                });
+            }
+            
+            leaguesMap.get(tournamentId).games.push({
+                sportEventId: event.sportEventId,
+                constSportEventId: event.constSportEventId,
+                mainConstSportEventId: event.mainConstSportEventId,
+                team1: event.opponent1NameLocalization,
+                team2: event.opponent2NameLocalization,
+                team1Image: event.imageOpponent1,
+                team2Image: event.imageOpponent2,
+                startDate: event.startDate,
+                startDateFormatted: formatDate(event.startDate),
+                link: event.link,
+                hasVideo: event.hasVideo,
+                hasInsights: event.hasInsights,
+                odds: mainOdds,
+                totalMarkets: event.oddsLocalization?.length || 0
+            });
+        });
+        
+        // Convert map to array and sort by league name
+        const leagues = Array.from(leaguesMap.values()).sort((a, b) => {
+            return (a.tournamentName || '').localeCompare(b.tournamentName || '');
+        });
+        
+        // Calculate total games
+        const totalGames = leagues.reduce((sum, league) => sum + league.games.length, 0);
+        
+        console.log(`✅ Found ${totalGames} football games across ${leagues.length} leagues`);
+        
+        res.json({
+            success: true,
+            sport: "Football (Soccer)",
+            sportId: 1,
+            summary: {
+                totalGames: totalGames,
+                totalLeagues: leagues.length
+            },
+            leagues: leagues
+        });
+        
+    } catch (error) {
+        console.error('❌ Error fetching all games:', error.response?.data || error.message);
+        res.status(500).json({
+            success: false,
+            error: error.response?.data || error.message
+        });
+    }
+});
+
+// Get odds for a specific sportEventId
+app.get('/event-odds/:sportEventId', async (req, res) => {
+    const sportEventId = req.params.sportEventId;
+    console.log(`📊 Getting odds for sportEventId: ${sportEventId}`);
+    
+    try {
+        if (!accessToken || Date.now() >= tokenExpiryTime) {
+            await getAccessToken();
+        }
+        
         const response = await axios.get(
             'https://cpservm.com/gateway/marketing/datafeed/prematch/api/v2/sportevents',
             {
@@ -402,12 +553,10 @@ app.get('/match-odds/:matchId', async (req, res) => {
     console.log(`📊 Getting odds for match ID: ${matchId}`);
     
     try {
-        // Make sure we have a valid token
         if (!accessToken || Date.now() >= tokenExpiryTime) {
             await getAccessToken();
         }
         
-        // First, get all events for this match
         const eventsResponse = await axios.get(
             'https://cpservm.com/gateway/marketing/datafeed/prematch/api/v2/sportevents',
             {
@@ -432,7 +581,6 @@ app.get('/match-odds/:matchId', async (req, res) => {
             });
         }
         
-        // Get the main match info from first event
         const matchInfo = {
             mainConstSportEventId: events[0].mainConstSportEventId,
             tournamentName: events[0].tournamentNameLocalization,
@@ -442,11 +590,10 @@ app.get('/match-odds/:matchId', async (req, res) => {
             sportId: events[0].sportId
         };
         
-        // Now get odds for each unique sportEventId
         const oddsResults = [];
         
         for (const event of events) {
-            console.log(`  📍 Getting odds for sportEventId: ${event.sportEventId} (Period: ${event.periodName || 'Main'}, Type: ${event.type})`);
+            console.log(`  📍 Getting odds for sportEventId: ${event.sportEventId}`);
             
             const oddsResponse = await axios.get(
                 'https://cpservm.com/gateway/marketing/datafeed/prematch/api/v2/sportevents',
@@ -499,8 +646,9 @@ app.get('/match-odds/:matchId', async (req, res) => {
 // Root endpoint - Show available endpoints
 app.get('/', (req, res) => {
     res.json({
-        name: 'Marketing API Integration',
+        name: 'Football Marketing API Integration',
         version: '1.0.0',
+        sport: 'Football Only (sportId=1)',
         endpoints: [
             {
                 path: '/test-auth',
@@ -510,31 +658,37 @@ app.get('/', (req, res) => {
             {
                 path: '/events',
                 method: 'GET',
-                description: 'Get sports events with odds',
-                params: '?lng=en&sportIds=1&count=10'
+                description: 'Get football events with odds',
+                params: '?lng=en&count=10'
             },
             {
                 path: '/events-by-match',
                 method: 'GET',
                 description: 'Get events grouped by match',
-                params: '?sportIds=1&count=50'
+                params: '?count=50'
             },
             {
                 path: '/games-today-tomorrow',
                 method: 'GET',
-                description: 'Get games for today and tomorrow only',
-                params: '?sportIds=1&lng=en'
+                description: 'Get FOOTBALL games for today and tomorrow with MANY LEAGUES',
+                params: '?lng=en&count=500'
+            },
+            {
+                path: '/all-games',
+                method: 'GET',
+                description: 'Get ALL FOOTBALL games from ALL LEAGUES (up to 500 games)',
+                params: '?count=500&lng=en'
             },
             {
                 path: '/event-odds/:sportEventId',
                 method: 'GET',
-                description: 'Get odds for specific event',
+                description: 'Get odds for specific football event',
                 example: '/event-odds/704114254'
             },
             {
                 path: '/match-odds/:matchId',
                 method: 'GET',
-                description: 'Get odds for all events in a match',
+                description: 'Get odds for all events in a football match',
                 example: '/match-odds/314606070'
             }
         ]
@@ -546,11 +700,9 @@ if (process.env.VERCEL) {
     module.exports = app;
 } else {
     app.listen(PORT, () => {
-        console.log(`🚀 Server running at http://localhost:${PORT}`);
-        console.log(`📋 Test auth at: http://localhost:${PORT}/test-auth`);
-        console.log(`⚽ Get events at: http://localhost:${PORT}/events`);
-        console.log(`🏆 Get events by match at: http://localhost:${PORT}/events-by-match`);
-        console.log(`📅 Get today/tomorrow games at: http://localhost:${PORT}/games-today-tomorrow`);
-        console.log(`📊 Get event odds at: http://localhost:${PORT}/event-odds/704114254`);
+        console.log(`🚀 Football API running at http://localhost:${PORT}`);
+        console.log(`⚽ Football only - sportId=1`);
+        console.log(`📅 Today/Tomorrow games: http://localhost:${PORT}/games-today-tomorrow`);
+        console.log(`🌍 All games: http://localhost:${PORT}/all-games`);
     });
 }
